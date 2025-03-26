@@ -5,13 +5,16 @@ import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import GLib, Gst
 from common.bus_call import bus_call
-
 import pyds
+import configparser
 
 # Update class IDs according to PeopleNet labels
 PGIE_CLASS_ID_PERSON = 0
 PGIE_CLASS_ID_BAG = 1
 PGIE_CLASS_ID_FACE = 2
+
+# Add global variable for past tracking meta
+past_tracking_meta = [0]
 
 def osd_sink_pad_buffer_probe(pad,info,u_data):
     frame_number=0
@@ -54,6 +57,8 @@ def osd_sink_pad_buffer_probe(pad,info,u_data):
             except StopIteration:
                 break
             obj_counter[obj_meta.class_id] += 1
+            # Add tracking ID to the display
+            obj_meta.text_params.display_text = "ID={} {}".format(obj_meta.object_id, obj_meta.obj_label)
             obj_meta.rect_params.border_color.set(0.0, 0.0, 1.0, 0.8) #0.8 is alpha (opacity)
             try: 
                 l_obj=l_obj.next
@@ -99,6 +104,40 @@ def osd_sink_pad_buffer_probe(pad,info,u_data):
             l_frame=l_frame.next
         except StopIteration:
             break
+            
+    # Add past tracking meta data processing
+    if(past_tracking_meta[0]==1):
+        l_user=batch_meta.batch_user_meta_list
+        while l_user is not None:
+            try:
+                user_meta=pyds.NvDsUserMeta.cast(l_user.data)
+            except StopIteration:
+                break
+            if(user_meta and user_meta.base_meta.meta_type==pyds.NvDsMetaType.NVDS_TRACKER_PAST_FRAME_META):
+                try:
+                    pPastFrameObjBatch = pyds.NvDsPastFrameObjBatch.cast(user_meta.user_meta_data)
+                except StopIteration:
+                    break
+                for trackobj in pyds.NvDsPastFrameObjBatch.list(pPastFrameObjBatch):
+                    print("streamId=",trackobj.streamID)
+                    print("surfaceStreamID=",trackobj.surfaceStreamID)
+                    for pastframeobj in pyds.NvDsPastFrameObjStream.list(trackobj):
+                        print("numobj=",pastframeobj.numObj)
+                        print("uniqueId=",pastframeobj.uniqueId)
+                        print("classId=",pastframeobj.classId)
+                        print("objLabel=",pastframeobj.objLabel)
+                        for objlist in pyds.NvDsPastFrameObjList.list(pastframeobj):
+                            print('frameNum:', objlist.frameNum)
+                            print('tBbox.left:', objlist.tBbox.left)
+                            print('tBbox.width:', objlist.tBbox.width)
+                            print('tBbox.top:', objlist.tBbox.top)
+                            print('tBbox.right:', objlist.tBbox.height)
+                            print('confidence:', objlist.confidence)
+                            print('age:', objlist.age)
+            try:
+                l_user=l_user.next
+            except StopIteration:
+                break
             
     return Gst.PadProbeReturn.OK    
 
@@ -223,17 +262,53 @@ def main(args):
     streammux.set_property('batch-size', 1)
     
     # Update config path to PeopleNet config
-    pgie.set_property('config-file-path', "peoplenet/config.txt")
+    pgie.set_property('config-file-path', "config/config_infer_peoplenet.txt")
+
+    # Add tracker after pgie
+    tracker = Gst.ElementFactory.make("nvtracker", "tracker")
+    if not tracker:
+        sys.stderr.write(" Unable to create tracker \n")
+
+    # Set properties of tracker
+    config = configparser.ConfigParser()
+    config.read('config/config_tracker.txt')
+    config.sections()
+
+    for key in config['tracker']:
+        if key == 'tracker-width':
+            tracker_width = config.getint('tracker', key)
+            tracker.set_property('tracker-width', tracker_width)
+        if key == 'tracker-height':
+            tracker_height = config.getint('tracker', key)
+            tracker.set_property('tracker-height', tracker_height)
+        if key == 'gpu-id':
+            tracker_gpu_id = config.getint('tracker', key)
+            tracker.set_property('gpu_id', tracker_gpu_id)
+        if key == 'll-lib-file':
+            tracker_ll_lib_file = config.get('tracker', key)
+            tracker.set_property('ll-lib-file', tracker_ll_lib_file)
+        if key == 'll-config-file':
+            tracker_ll_config_file = config.get('tracker', key)
+            tracker.set_property('ll-config-file', tracker_ll_config_file)
+        if key == 'enable-batch-process':
+            tracker_enable_batch_process = config.getint('tracker', key)
+            tracker.set_property('enable_batch_process', tracker_enable_batch_process)
+        if key == 'enable-past-frame':
+            tracker_enable_past_frame = config.getint('tracker', key)
+            tracker.set_property('enable_past_frame', tracker_enable_past_frame)
+            past_tracking_meta[0] = tracker_enable_past_frame
 
     # Add remaining elements to pipeline
     pipeline.add(pgie)
+    pipeline.add(tracker)
     pipeline.add(nvvidconv)
     pipeline.add(nvosd)
     pipeline.add(sink)
 
     # Link the elements
     streammux.link(pgie)
-    pgie.link(nvvidconv)
+    pgie.link(tracker)
+    tracker.link(nvvidconv)
     nvvidconv.link(nvosd)
     nvosd.link(sink)
 
