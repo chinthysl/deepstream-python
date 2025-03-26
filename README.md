@@ -43,12 +43,13 @@ This project implements a DeepStream pipeline for monitoring people in multiple 
 
 2. Run the pipeline:
    ```bash
-   python main.py
+   python3 test.py <videofile> <roi x> <roi y> <roi width> <roi height> <timeout in sec>
+   python3 test.py sample_1080p_h264.mp4 10 400 500 400 2
    ```
 
-## Future addons
+## Future development
 
-- Enable camera streams
+- Enable multiple streams
 - Dynamic addition of streams
 - RTSP server activation or video recoding when loitering detected
 - Deployment optimizations of edge devices to cater more video streams
