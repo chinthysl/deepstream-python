@@ -4,7 +4,6 @@ import os
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import GLib, Gst
-from common.is_aarch_64 import is_aarch64
 from common.bus_call import bus_call
 
 import pyds
@@ -103,6 +102,58 @@ def osd_sink_pad_buffer_probe(pad,info,u_data):
             
     return Gst.PadProbeReturn.OK    
 
+def cb_newpad(decodebin, decoder_src_pad, data):
+    print("In cb_newpad\n")
+    caps = decoder_src_pad.get_current_caps()
+    if not caps:
+        caps = decoder_src_pad.query_caps()
+    gststruct = caps.get_structure(0)
+    gstname = gststruct.get_name()
+    source_bin = data
+    features = caps.get_features(0)
+
+    print("gstname=", gstname)
+    if(gstname.find("video")!=-1):
+        print("features=", features)
+        if features.contains("memory:NVMM"):
+            bin_ghost_pad = source_bin.get_static_pad("src")
+            if not bin_ghost_pad.set_target(decoder_src_pad):
+                sys.stderr.write("Failed to link decoder src pad to source bin ghost pad\n")
+        else:
+            sys.stderr.write(" Error: Decodebin did not pick nvidia decoder plugin.\n")
+
+def decodebin_child_added(child_proxy, Object, name, user_data):
+    print("Decodebin child added:", name, "\n")
+    if(name.find("decodebin") != -1):
+        Object.connect("child-added", decodebin_child_added, user_data)
+    
+    if "source" in name:
+        source_element = child_proxy.get_by_name("source")
+        if source_element.find_property('drop-on-latency') != None:
+            Object.set_property("drop-on-latency", True)
+
+def create_source_bin(index, uri):
+    print("Creating source bin")
+    bin_name = "source-bin-%02d" % index
+    print(bin_name)
+    nbin = Gst.Bin.new(bin_name)
+    if not nbin:
+        sys.stderr.write(" Unable to create source bin \n")
+
+    uri_decode_bin = Gst.ElementFactory.make("uridecodebin", "uri-decode-bin")
+    if not uri_decode_bin:
+        sys.stderr.write(" Unable to create uri decode bin \n")
+
+    uri_decode_bin.set_property("uri", uri)
+    uri_decode_bin.connect("pad-added", cb_newpad, nbin)
+    uri_decode_bin.connect("child-added", decodebin_child_added, nbin)
+
+    Gst.Bin.add(nbin, uri_decode_bin)
+    bin_pad = nbin.add_pad(Gst.GhostPad.new_no_target("src", Gst.PadDirection.SRC))
+    if not bin_pad:
+        sys.stderr.write(" Failed to add ghost pad in source bin \n")
+        return None
+    return nbin
 
 def main(args):
     # Check input arguments
@@ -116,117 +167,88 @@ def main(args):
     # Create Pipeline
     print("Creating Pipeline \n ")
     pipeline = Gst.Pipeline()
-
     if not pipeline:
         sys.stderr.write(" Unable to create Pipeline \n")
 
-    # Source element for reading from the file
-    print("Creating Source \n ")
-    source = Gst.ElementFactory.make("filesrc", "file-source")
-    if not source:
-        sys.stderr.write(" Unable to create Source \n")
-
-    # Since the data format in the input file is elementary h264 stream,
-    # we need a h264parser
-    print("Creating H264Parser \n")
-    h264parser = Gst.ElementFactory.make("h264parse", "h264-parser")
-    if not h264parser:
-        sys.stderr.write(" Unable to create h264 parser \n")
-
-    # Use nvdec_h264 for hardware accelerated decode on GPU
-    print("Creating Decoder \n")
-    decoder = Gst.ElementFactory.make("nvv4l2decoder", "nvv4l2-decoder")
-    if not decoder:
-        sys.stderr.write(" Unable to create Nvv4l2 Decoder \n")
-
-    # Create nvstreammux instance to form batches from one or more sources.
+    print("Creating streamux \n ")
+    # Create nvstreammux instance
     streammux = Gst.ElementFactory.make("nvstreammux", "Stream-muxer")
     if not streammux:
         sys.stderr.write(" Unable to create NvStreamMux \n")
 
-    # Use nvinfer to run inferencing on decoder's output,
-    # behaviour of inferencing is set through config file
+    pipeline.add(streammux)
+
+    # Create source_bin and add it to pipeline
+    uri_name = "file://" + os.path.abspath(args[1])
+    source_bin = create_source_bin(0, uri_name)
+    if not source_bin:
+        sys.stderr.write("Unable to create source bin \n")
+    pipeline.add(source_bin)
+
+    # Link source_bin to streammux
+    padname = "sink_0"
+    sinkpad = streammux.get_request_pad(padname)
+    if not sinkpad:
+        sys.stderr.write("Unable to create sink pad bin \n")
+    srcpad = source_bin.get_static_pad("src")
+    if not srcpad:
+        sys.stderr.write("Unable to create src pad bin \n")
+    srcpad.link(sinkpad)
+
+    # Create rest of the pipeline elements
     pgie = Gst.ElementFactory.make("nvinfer", "primary-inference")
     if not pgie:
         sys.stderr.write(" Unable to create pgie \n")
 
-    # Use convertor to convert from NV12 to RGBA as required by nvosd
     nvvidconv = Gst.ElementFactory.make("nvvideoconvert", "convertor")
     if not nvvidconv:
         sys.stderr.write(" Unable to create nvvidconv \n")
 
     # Create OSD to draw on the converted RGBA buffer
     nvosd = Gst.ElementFactory.make("nvdsosd", "onscreendisplay")
-
     if not nvosd:
         sys.stderr.write(" Unable to create nvosd \n")
 
     # Finally render the osd output
-
     print("Creating nv3dsink \n")
     sink = Gst.ElementFactory.make("nv3dsink", "nv3d-sink")
     if not sink:
         sys.stderr.write(" Unable to create nv3dsink \n")
 
-
     # Set properties
-    print("Playing file %s " % args[1])
-    source.set_property('location', args[1])
-    if os.environ.get('USE_NEW_NVSTREAMMUX') != 'yes': # Only set these properties if not using new gst-nvstreammux
+    if os.environ.get('USE_NEW_NVSTREAMMUX') != 'yes':
         streammux.set_property('width', 1920)
         streammux.set_property('height', 1080)
         streammux.set_property('batched-push-timeout', 4000000)
-    
     streammux.set_property('batch-size', 1)
     
     # Update config path to PeopleNet config
     pgie.set_property('config-file-path', "peoplenet/config.txt")
 
-    # Add elements to pipeline
-    print("Adding elements to Pipeline \n")
-    pipeline.add(source)
-    pipeline.add(h264parser)
-    pipeline.add(decoder)
-    pipeline.add(streammux)
+    # Add remaining elements to pipeline
     pipeline.add(pgie)
     pipeline.add(nvvidconv)
     pipeline.add(nvosd)
     pipeline.add(sink)
 
-    # we link the elements together
-    # file-source -> h264-parser -> nvh264-decoder ->
-    # nvinfer -> nvvidconv -> nvosd -> video-renderer
-    print("Linking elements in the Pipeline \n")
-    source.link(h264parser)
-    h264parser.link(decoder)
-
-    sinkpad = streammux.get_request_pad("sink_0")
-    if not sinkpad:
-        sys.stderr.write(" Unable to get the sink pad of streammux \n")
-    srcpad = decoder.get_static_pad("src")
-    if not srcpad:
-        sys.stderr.write(" Unable to get source pad of decoder \n")
-    srcpad.link(sinkpad)
+    # Link the elements
     streammux.link(pgie)
     pgie.link(nvvidconv)
     nvvidconv.link(nvosd)
     nvosd.link(sink)
 
-    # create an event loop and feed gstreamer bus mesages to it
+    # Create an event loop and feed GStreamer bus messages to it
     loop = GLib.MainLoop()
     bus = pipeline.get_bus()
     bus.add_signal_watch()
-    bus.connect ("message", bus_call, loop)
+    bus.connect("message", bus_call, loop)
 
-    # Lets add probe to get informed of the meta data generated, we add probe to
-    # the sink pad of the osd element, since by that time, the buffer would have
-    # had got all the metadata.
+    # Add probe to get informed of the meta data
     osdsinkpad = nvosd.get_static_pad("sink")
     if not osdsinkpad:
         sys.stderr.write(" Unable to get sink pad of nvosd \n")
     osdsinkpad.add_probe(Gst.PadProbeType.BUFFER, osd_sink_pad_buffer_probe, 0)
 
-    # start play back and listen to events
     print("Starting pipeline \n")
     pipeline.set_state(Gst.State.PLAYING)
     try:
