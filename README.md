@@ -4,10 +4,11 @@ This project implements a DeepStream pipeline for monitoring people in multiple 
 
 ## Features
 
-- Support for multiple video files
-- PeopleNet-based person detection and tracking
+- Support video and rtsp streams
+- PeopleNet-based person detection
+- Person tracking using nvDCF tracker
 - Configurable Regions of Interest (ROIs) with a timeout for loitering alerts
-- Visual alerts when people remain in ROIs beyond timeout
+- Visual alerts when people remain in ROIs beyond a n seconds
 - Multi-camera grid display
 - Real-time visualization with bounding boxes and tracking IDs
 
@@ -30,17 +31,6 @@ This project implements a DeepStream pipeline for monitoring people in multiple 
    cd deepstream-python
    ```
 
-2. Modify the camera streams and ROIs in `main.py`:
-   ```python
-   # Add cameras
-   pipeline.add_camera(0, "rtsp://video1.mp4")
-   pipeline.add_camera(1, "rtsp://video2.mp4")
-   
-   # Add ROIs with timeouts (in seconds)
-   pipeline.add_roi(0, [(100, 100), (200, 100), (200, 200), (100, 200)], 5.0, 0)
-   pipeline.add_roi(1, [(300, 300), (400, 300), (400, 400), (300, 400)], 3.0, 1)
-   ```
-
 2. Run the pipeline:
    ```bash
    python3 test.py <videofile> <roi x> <roi y> <roi width> <roi height> <timeout in sec>
@@ -55,6 +45,9 @@ This project implements a DeepStream pipeline for monitoring people in multiple 
 - Deployment optimizations of edge devices to cater more video streams
 - API and alert based control of the pipeline
 
+## Test
+
+Pipeline was tested on Jetson AGX Xavier. Screen recording of the test in output.webm
 
 ## License
 
